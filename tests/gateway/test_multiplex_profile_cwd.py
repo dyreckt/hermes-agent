@@ -297,13 +297,21 @@ def test_multiplex_at_reference_expansion_uses_profile_cwd(monkeypatch, tmp_path
     )
     event = MessageEvent(text="please look at @file:notes.txt", source=source)
 
-    asyncio.run(
-        runner._prepare_profile_scoped_inbound_message_text(
-            event=event,
-            source=source,
-            history=[],
+    # Real code flow: _set_session_env binds the ContextVar first, then
+    # _prepare_profile_scoped_inbound_message_text reads it. The test must
+    # simulate that ordering.
+    context = _context()
+    tokens = runner._set_session_env(context)
+    try:
+        asyncio.run(
+            runner._prepare_profile_scoped_inbound_message_text(
+                event=event,
+                source=source,
+                history=[],
+            )
         )
-    )
+    finally:
+        runner._clear_session_env(tokens)
 
     assert captured.get("cwd") == str(workspace), (
         f"@-reference expansion should use profile cwd {workspace!r}, got {captured.get('cwd')!r}"

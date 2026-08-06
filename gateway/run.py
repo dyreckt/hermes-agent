@@ -16198,26 +16198,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Run inbound preprocessing under the routed profile when multiplexed."""
         if getattr(getattr(self, "config", None), "multiplex_profiles", False):
             with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
-                # Bind the routed profile's cwd BEFORE inbound preprocessing so
-                # @-reference expansion resolves the profile workspace instead
-                # of the primary profile's process-global TERMINAL_CWD. The
-                # normal session binding happens later in the turn; this early
-                # pin covers readers that run before _set_session_env().
-                from agent.runtime_cwd import (
-                    clear_session_cwd,
-                    set_session_cwd,
+                # NOTE: _set_session_env() already binds the routed profile's cwd
+                # via the session ContextVar before this function is called.
+                # Binding and clearing here would wipe that value, breaking the
+                # runtime footer and any downstream cwd consumers.
+                return await self._prepare_inbound_message_text(
+                    event=event,
+                    source=source,
+                    history=history,
+                    session_key=session_key,
                 )
-
-                set_session_cwd(self._session_cwd_for_source(source) or "")
-                try:
-                    return await self._prepare_inbound_message_text(
-                        event=event,
-                        source=source,
-                        history=history,
-                        session_key=session_key,
-                    )
-                finally:
-                    clear_session_cwd()
         return await self._prepare_inbound_message_text(
             event=event,
             source=source,
