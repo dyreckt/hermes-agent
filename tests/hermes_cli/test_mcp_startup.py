@@ -163,6 +163,102 @@ def test_portable_only_mcp_configuration_opens_startup_gate(monkeypatch):
     assert mcp_startup._has_configured_mcp_servers() is True
 
 
+@pytest.mark.parametrize("enabled", [False, 0, "false", "0", "no", "off"])
+def test_disabled_native_mcp_configuration_keeps_startup_gate_closed(
+    monkeypatch, enabled
+):
+    raw_config = {"mcp_servers": {"demo": {"enabled": enabled}}}
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        types.SimpleNamespace(read_raw_config=lambda: raw_config),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.agent_plugins",
+        types.SimpleNamespace(
+            has_enabled_agent_plugin_mcp=lambda _config: False,
+        ),
+    )
+
+    assert mcp_startup._has_configured_mcp_servers() is False
+
+
+def test_enabled_native_mcp_configuration_opens_startup_gate(monkeypatch):
+    raw_config = {
+        "mcp_servers": {
+            "disabled": {"enabled": False},
+            "enabled": {"transport": "stdio"},
+        }
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        types.SimpleNamespace(read_raw_config=lambda: raw_config),
+    )
+
+    assert mcp_startup._has_configured_mcp_servers() is True
+
+
+def test_disabled_native_mcp_still_allows_enabled_portable_mcp(monkeypatch):
+    raw_config = {"mcp_servers": {"disabled": {"enabled": False}}}
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        types.SimpleNamespace(read_raw_config=lambda: raw_config),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.agent_plugins",
+        types.SimpleNamespace(
+            has_enabled_agent_plugin_mcp=lambda _config: True,
+        ),
+    )
+
+    assert mcp_startup._has_configured_mcp_servers() is True
+
+
+@pytest.mark.parametrize(
+    "raw_config",
+    [
+        {},
+        {"mcp_servers": {}},
+        {"mcp_servers": {"disabled": {"enabled": False}}},
+    ],
+)
+def test_no_enabled_mcp_does_not_emit_retry_warning(monkeypatch, raw_config):
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        types.SimpleNamespace(read_raw_config=lambda: raw_config),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.agent_plugins",
+        types.SimpleNamespace(
+            has_enabled_agent_plugin_mcp=lambda _config: False,
+        ),
+    )
+    warnings = []
+    logger = types.SimpleNamespace(
+        debug=lambda *_a, **_k: None,
+        warning=lambda message, *_a, **_k: warnings.append(message),
+    )
+
+    mcp_startup.start_background_mcp_discovery(
+        logger=logger,
+        thread_name="disabled-mcp-discovery",
+    )
+    mcp_startup.start_background_mcp_discovery(
+        logger=logger,
+        thread_name="disabled-mcp-discovery",
+    )
+
+    assert warnings == []
+    assert mcp_startup._mcp_discovery_started is False
+    assert mcp_startup._mcp_discovery_thread is None
+
+
 
 
 
@@ -199,3 +295,49 @@ def _install_retry_stubs(monkeypatch, *, connected: bool, calls: dict):
     )
 
 
+def test_configured_zero_connected_discovery_retries(monkeypatch):
+    calls = {"mcp": 0}
+    warnings = []
+    _install_retry_stubs(monkeypatch, connected=False, calls=calls)
+    logger = types.SimpleNamespace(
+        debug=lambda *_a, **_k: None,
+        warning=lambda message, *_a, **_k: warnings.append(message),
+    )
+
+    mcp_startup.start_background_mcp_discovery(
+        logger=logger,
+        thread_name="zero-connected-mcp-discovery",
+    )
+    first_thread = mcp_startup._mcp_discovery_thread
+    assert first_thread is not None
+    first_thread.join(timeout=1.0)
+    mcp_startup.start_background_mcp_discovery(
+        logger=logger,
+        thread_name="zero-connected-mcp-discovery",
+    )
+    second_thread = mcp_startup._mcp_discovery_thread
+    assert second_thread is not None
+    second_thread.join(timeout=1.0)
+
+    assert calls["mcp"] == 2
+    assert any("retrying discovery thread" in message for message in warnings)
+
+
+def test_connected_discovery_is_not_restarted(monkeypatch):
+    calls = {"mcp": 0}
+    _install_retry_stubs(monkeypatch, connected=True, calls=calls)
+
+    mcp_startup.start_background_mcp_discovery(
+        logger=_retry_logger(),
+        thread_name="connected-mcp-discovery",
+    )
+    thread = mcp_startup._mcp_discovery_thread
+    assert thread is not None
+    thread.join(timeout=1.0)
+    mcp_startup.start_background_mcp_discovery(
+        logger=_retry_logger(),
+        thread_name="connected-mcp-discovery",
+    )
+
+    assert calls["mcp"] == 1
+    assert mcp_startup._mcp_discovery_thread is None
